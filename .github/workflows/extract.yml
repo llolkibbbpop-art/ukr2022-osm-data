@@ -1,0 +1,61 @@
+name: Extract OSM (south Ukraine, 2022)
+on:
+  push:
+    branches: [main]
+    paths: ['extract/**', '.github/workflows/extract.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: { group: extract, cancel-in-progress: true }
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install osmium
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq osmium-tool
+      - name: Download Ukraine snapshot (prefer 2022-01-01)
+        run: |
+          set -e
+          for f in ukraine-220101.osm.pbf ukraine-230101.osm.pbf ukraine-latest.osm.pbf; do
+            if curl -fsSL --retry 3 -o ua.osm.pbf "https://download.geofabrik.de/europe/$f"; then echo "SNAPSHOT=$f" >> $GITHUB_ENV; echo "got $f"; break; fi
+            echo "no $f"
+          done
+          ls -la ua.osm.pbf
+          osmium fileinfo -e ua.osm.pbf | grep -E "Timestamp|Number of" | head -12 || true
+      - name: Cut south and filter tags
+        run: |
+          set -e
+          osmium extract -b 30.9,44.3,38.6,48.2 --strategy=smart ua.osm.pbf -o south.osm.pbf --overwrite
+          osmium tags-filter south.osm.pbf \
+            w/highway=motorway,trunk,primary,secondary,tertiary,unclassified,residential,living_street,service,track,road,pedestrian,motorway_link,trunk_link,primary_link,secondary_link,tertiary_link \
+            w/railway=rail,narrow_gauge,light_rail,tram n/railway=station,halt \
+            wr/landuse=forest,residential,industrial,military,retail,commercial,garages,railway,cemetery,orchard,vineyard,farmyard \
+            wr/natural=wood,tree_row,scrub,wetland,water,beach,sand,coastline \
+            w/waterway=riverbank,dam,river,canal,stream,ditch \
+            wr/water \
+            n/place=city,town,village,hamlet \
+            w/man_made=bridge wr/aeroway=aerodrome,runway \
+            -o feat.osm.pbf --overwrite
+          osmium tags-filter south.osm.pbf wr/building -o bld.osm.pbf --overwrite
+          ls -la *.pbf
+      - name: Export GeoJSON and pack
+        run: |
+          set -e
+          osmium export feat.osm.pbf -f geojsonseq -a type,id -x print_record_separator=false --geometry-types=point,linestring,polygon -o feat.geojsonseq --overwrite
+          osmium export bld.osm.pbf -f geojsonseq -a type,id -x print_record_separator=false --geometry-types=polygon -o bld.geojsonseq --overwrite
+          ls -la *.geojsonseq
+          rm -rf data && mkdir data
+          python3 extract/pack.py feat.geojsonseq data/osm "$SNAPSHOT"
+          python3 extract/pack.py bld.geojsonseq data/bld "$SNAPSHOT" --buildings
+          ls -la data
+      - name: Commit results to branch data
+        run: |
+          set -e
+          git config user.name "osm-extract-bot"; git config user.email "actions@users.noreply.github.com"
+          git checkout --orphan data
+          git rm -rf --cached . >/dev/null
+          git add data
+          git commit -qm "OSM south Ukraine extract ($SNAPSHOT)"
+          git push -f origin data
