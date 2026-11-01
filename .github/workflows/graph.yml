@@ -1,0 +1,34 @@
+name: Road graph (south Ukraine, 2022)
+on:
+  push:
+    branches: [main]
+    paths: ['graph/**', '.github/workflows/graph.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: { group: graph, cancel-in-progress: true }
+jobs:
+  graph:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq osmium-tool && pip install -q osmium
+      - name: Download 2022-01-01 snapshot
+        run: curl -fsSL --retry 3 -o ua.osm.pbf https://download.geofabrik.de/europe/ukraine-220101.osm.pbf && ls -la ua.osm.pbf
+      - name: Cut south, keep roads
+        run: |
+          osmium extract -b 30.9,44.3,38.6,48.2 --strategy=complete_ways ua.osm.pbf -o south.osm.pbf --overwrite
+          osmium tags-filter south.osm.pbf w/highway -o roads.osm.pbf --overwrite
+          ls -la *.pbf
+      - name: Build graph
+        run: mkdir -p out && python3 graph/graph.py roads.osm.pbf out/graph.json.gz
+      - name: Commit to branch graph
+        run: |
+          git config user.name "osm-extract-bot"; git config user.email "actions@users.noreply.github.com"
+          git checkout --orphan graph
+          git rm -rf --cached . >/dev/null
+          git add -f out/graph.json.gz
+          git commit -qm "Road graph south Ukraine (2022-01-01)"
+          git push -f origin graph
